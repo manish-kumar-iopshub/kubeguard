@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crashloop-test
+spec:
+  containers:
+  - name: crash-container
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        echo "Application starting..."
+        sleep 3
+        echo "Connecting to database..."
+        sleep 2
+        echo "ERROR: Database connection failed"
+        echo "Application exiting due to fatal error"
+        exit 1

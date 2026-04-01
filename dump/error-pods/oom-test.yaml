@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-test
+spec:
+  containers:
+  - name: memory-eater
+    image: python:3.9-slim
+    command: ["python", "-c", "a = ' ' * (1024 * 1024 * 500)"]
+    resources:
+      limits:
+        memory: "50Mi"
+      requests:
+        memory: "50Mi"

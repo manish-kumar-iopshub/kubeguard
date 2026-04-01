@@ -127,3 +127,22 @@ class SecretLeakIgnoresOverviewView(APIView):
 
     def get(self, request):
         return Response(services.get_secret_leak_ignores_overview())
+
+
+class PodAlertSettingsView(APIView):
+    """Google Chat alerting + silence controls for unhealthy pod scans."""
+
+    def get(self, request):
+        return Response(services.get_pod_alert_settings())
+
+    def put(self, request):
+        body = request.data or {}
+        try:
+            saved = services.save_pod_alert_settings(
+                google_chat_webhook_url=body.get("google_chat_webhook_url"),
+                silence_turns=body.get("silence_turns"),
+                enabled=body.get("enabled"),
+            )
+            return Response(saved)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)

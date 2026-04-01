@@ -4,6 +4,8 @@ import {
   saveScannerSettings,
   getSecretScannerSettings,
   saveSecretScannerSettings,
+  getPodAlertSettings,
+  savePodAlertSettings,
 } from "../api";
 
 function parseList(text) {
@@ -20,18 +22,29 @@ export default function ScannerSettings() {
   const [secExcludeRes, setSecExcludeRes] = useState("");
   const [savedDep, setSavedDep] = useState(null);
   const [savedSec, setSavedSec] = useState(null);
+  const [podWebhookUrl, setPodWebhookUrl] = useState("");
+  const [podSilenceTurns, setPodSilenceTurns] = useState("60");
+  const [podEnabled, setPodEnabled] = useState(true);
+  const [savedPod, setSavedPod] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    Promise.all([getScannerSettings(), getSecretScannerSettings()])
-      .then(([d, s]) => {
+    Promise.all([
+      getScannerSettings(),
+      getSecretScannerSettings(),
+      getPodAlertSettings(),
+    ])
+      .then(([d, s, p]) => {
         setDepExcludeNs((d?.exclude_namespaces || []).join("\n"));
         setDepSkipWl((d?.skip_workloads || []).join("\n"));
         setSecExcludeNs((s?.exclude_namespaces || []).join("\n"));
         setSecExcludeRes((s?.exclude_resources || []).join("\n"));
+        setPodWebhookUrl(p?.google_chat_webhook_url || "");
+        setPodSilenceTurns(String(p?.silence_turns ?? 60));
+        setPodEnabled(Boolean(p?.enabled ?? true));
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -71,6 +84,27 @@ export default function ScannerSettings() {
       setSecExcludeRes((body.exclude_resources || []).join("\n"));
       setSavedSec(
         "Secret / ConfigMap scanner settings saved. Next leakage scan merges these exclusions."
+      );
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const savePodAlerts = async () => {
+    setSavedPod(null);
+    setError(null);
+    try {
+      const turns = Number.parseInt(podSilenceTurns, 10);
+      const body = await savePodAlertSettings({
+        google_chat_webhook_url: podWebhookUrl.trim(),
+        silence_turns: Number.isFinite(turns) ? turns : 60,
+        enabled: podEnabled,
+      });
+      setPodWebhookUrl(body.google_chat_webhook_url || "");
+      setPodSilenceTurns(String(body.silence_turns ?? 60));
+      setPodEnabled(Boolean(body.enabled ?? true));
+      setSavedPod(
+        "Unhealthy pod alert settings saved. Auto-scan runs every 60s, sequentially."
       );
     } catch (e) {
       setError(e.message);
@@ -189,6 +223,60 @@ export default function ScannerSettings() {
             >
               Save secret scanner settings
             </button>
+          </section>
+
+          <section className="border border-sky-200 rounded-xl p-6 bg-sky-50/30 shadow-sm">
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">
+              Unhealthy pod alerting
+            </h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Unhealthy pod scans run automatically in sequence: scan completes,
+              wait 60 seconds, then next scan (no parallel runs). Alerts are sent to
+              Google Chat and then silenced per workload for the configured number
+              of scan turns.
+            </p>
+            {savedPod && (
+              <div className="mb-4 p-3 bg-green-50 text-green-800 rounded-lg text-sm">
+                {savedPod}
+              </div>
+            )}
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Google Chat webhook URL
+            </label>
+            <input
+              type="url"
+              value={podWebhookUrl}
+              onChange={(e) => setPodWebhookUrl(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono mb-4 bg-white"
+              placeholder="https://chat.googleapis.com/v1/spaces/..."
+            />
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Silence turns per workload
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={podSilenceTurns}
+              onChange={(e) => setPodSilenceTurns(e.target.value)}
+              className="w-48 border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 bg-white"
+            />
+            <label className="inline-flex items-center gap-2 text-sm text-gray-700 mb-4">
+              <input
+                type="checkbox"
+                checked={podEnabled}
+                onChange={(e) => setPodEnabled(e.target.checked)}
+              />
+              Enable Google Chat unhealthy pod alerts
+            </label>
+            <div>
+              <button
+                type="button"
+                onClick={savePodAlerts}
+                className="px-4 py-2 bg-sky-600 text-white text-sm font-medium rounded-lg hover:bg-sky-700"
+              >
+                Save pod alert settings
+              </button>
+            </div>
           </section>
         </>
       )}

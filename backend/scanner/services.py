@@ -1,6 +1,10 @@
 import os
 import sys
 import threading
+import time
+import json
+from urllib import request as urlrequest
+from urllib.error import URLError, HTTPError
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -23,6 +27,9 @@ from .deployment_risk import (
 SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts"))
 if SCANNER_DIR not in sys.path:
     sys.path.insert(0, SCANNER_DIR)
+
+_pod_scheduler_started = False
+_pod_scheduler_lock = threading.Lock()
 
 def _now():
     return datetime.now(timezone.utc)
@@ -274,6 +281,11 @@ def _run_scan(scan_id, scan_type, params):
                 "data": data,
             }},
         )
+        if scan_type == "pods":
+            try:
+                _process_unhealthy_pod_alerts(db, data)
+            except Exception as alert_exc:
+                print(f"[pod-alert] alert processing failed: {alert_exc}")
     except Exception as exc:
         db.scan_results.update_one(
             {"_id": scan_id},
@@ -459,3 +471,158 @@ def get_secret_leak_ignores_overview():
         key=lambda x: (x["namespace"] or "", x["kind"] or "", x["object_name"] or "")
     )
     return {"excluded_resources": excluded, "ignored_issues": ignored_issues}
+
+
+def _default_pod_alert_settings():
+    return {
+        "google_chat_webhook_url": "",
+        "silence_turns": 60,
+        "interval_seconds": 60,
+        "enabled": True,
+    }
+
+
+def get_pod_alert_settings():
+    db = get_db()
+    defaults = _default_pod_alert_settings()
+    doc = db.app_settings.find_one({"_id": "pod_alerting"}) or {}
+    return {
+        "google_chat_webhook_url": doc.get("google_chat_webhook_url", defaults["google_chat_webhook_url"]),
+        "silence_turns": int(doc.get("silence_turns", defaults["silence_turns"])),
+        "interval_seconds": int(doc.get("interval_seconds", defaults["interval_seconds"])),
+        "enabled": bool(doc.get("enabled", defaults["enabled"])),
+    }
+
+
+def save_pod_alert_settings(google_chat_webhook_url=None, silence_turns=None, enabled=None):
+    current = get_pod_alert_settings()
+    url = current["google_chat_webhook_url"] if google_chat_webhook_url is None else str(google_chat_webhook_url).strip()
+    turns = current["silence_turns"] if silence_turns is None else int(silence_turns)
+    is_enabled = current["enabled"] if enabled is None else bool(enabled)
+    if url and not url.startswith("https://chat.googleapis.com/"):
+        raise ValueError("Google Chat webhook URL must start with https://chat.googleapis.com/")
+    if turns < 1:
+        raise ValueError("silence_turns must be >= 1")
+    db = get_db()
+    db.app_settings.update_one(
+        {"_id": "pod_alerting"},
+        {
+            "$set": {
+                "google_chat_webhook_url": url,
+                "silence_turns": turns,
+                "interval_seconds": 60,
+                "enabled": is_enabled,
+                "updated_at": _now(),
+            }
+        },
+        upsert=True,
+    )
+    return get_pod_alert_settings()
+
+
+def _workload_key_from_pod(p):
+    ns = p.get("namespace") or "default"
+    owner = ((p.get("diagnostics") or {}).get("owner") or "").strip()
+    if owner:
+        return f"{ns}:{owner}"
+    return f"{ns}:Pod/{p.get('pod_name') or 'unknown'}"
+
+
+def _send_google_chat_message(webhook_url, text):
+    payload = json.dumps({"text": text}).encode("utf-8")
+    req = urlrequest.Request(
+        webhook_url,
+        data=payload,
+        headers={"Content-Type": "application/json; charset=UTF-8"},
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=10) as resp:
+        status = getattr(resp, "status", 200)
+    if status >= 300:
+        raise RuntimeError(f"Google Chat webhook responded with status {status}")
+
+
+def _process_unhealthy_pod_alerts(db, scan_data):
+    settings = get_pod_alert_settings()
+    if not settings.get("enabled"):
+        return
+    webhook = settings.get("google_chat_webhook_url") or ""
+    if not webhook:
+        return
+
+    db.alert_counters.find_one_and_update(
+        {"_id": "pods_scan_turn"},
+        {"$inc": {"value": 1}, "$setOnInsert": {"created_at": _now()}},
+        upsert=True,
+    )
+    counter = db.alert_counters.find_one({"_id": "pods_scan_turn"}) or {}
+    current_turn = int(counter.get("value", 1))
+    silence_turns = int(settings.get("silence_turns", 60))
+    pods = list((scan_data or {}).get("unhealthy_pods") or [])
+    by_workload = {}
+    for p in pods:
+        key = _workload_key_from_pod(p)
+        by_workload.setdefault(key, []).append(p)
+
+    for workload_key, workload_pods in by_workload.items():
+        state = db.pod_alert_state.find_one({"_id": workload_key}) or {}
+        muted_until_turn = int(state.get("muted_until_turn", 0))
+        if current_turn < muted_until_turn:
+            continue
+        top = workload_pods[0]
+        text = (
+            f"[Unhealthy Pod Alert] workload={workload_key}\n"
+            f"pods={len(workload_pods)}, reason={top.get('reason')}, state={top.get('state')}\n"
+            f"scan_timestamp={scan_data.get('timestamp')}"
+        )
+        try:
+            _send_google_chat_message(webhook, text)
+            db.pod_alert_state.update_one(
+                {"_id": workload_key},
+                {
+                    "$set": {
+                        "namespace": top.get("namespace"),
+                        "reason": top.get("reason"),
+                        "state": top.get("state"),
+                        "last_alert_turn": current_turn,
+                        "muted_until_turn": current_turn + silence_turns,
+                        "updated_at": _now(),
+                    }
+                },
+                upsert=True,
+            )
+        except (HTTPError, URLError, TimeoutError, RuntimeError):
+            continue
+
+
+def _create_running_scan_doc(scan_type):
+    db = get_db()
+    doc = {
+        "scan_type": scan_type,
+        "status": "running",
+        "created_at": _now(),
+        "completed_at": None,
+        "summary": None,
+        "data": None,
+        "error": None,
+        "meta": {"trigger": "auto-scheduler"},
+    }
+    result = db.scan_results.insert_one(doc)
+    return result.inserted_id
+
+
+def _pods_scheduler_loop():
+    while True:
+        scan_id = _create_running_scan_doc("pods")
+        _run_scan(scan_id, "pods", {})
+        time.sleep(60)
+
+
+def start_background_jobs():
+    global _pod_scheduler_started
+    with _pod_scheduler_lock:
+        if _pod_scheduler_started:
+            return
+        _pod_scheduler_started = True
+    t = threading.Thread(target=_pods_scheduler_loop, daemon=True)
+    t.start()

@@ -32,6 +32,47 @@ export const getScannerSettings = () => request("/settings/scanner/");
 export const saveScannerSettings = (body) =>
   request("/settings/scanner/", { method: "PUT", body: JSON.stringify(body) });
 
+export const getSecretScannerSettings = () =>
+  request("/settings/secret-scanner/");
+
+export const saveSecretScannerSettings = (body) =>
+  request("/settings/secret-scanner/", { method: "PUT", body: JSON.stringify(body) });
+
+function secretPath(namespace, kind, objectName) {
+  return `/secrets/${encodeURIComponent(namespace)}/${encodeURIComponent(
+    kind
+  )}/${encodeURIComponent(objectName)}/`;
+}
+
+export const ignoreSecretIssue = (namespace, kind, objectName, issueId) =>
+  request(`${secretPath(namespace, kind, objectName)}ignore-issue/`, {
+    method: "POST",
+    body: JSON.stringify({ issue_id: issueId }),
+  });
+
+export const unignoreSecretIssue = (namespace, kind, objectName, issueId) =>
+  request(
+    `${secretPath(
+      namespace,
+      kind,
+      objectName
+    )}ignore-issue/?issue_id=${encodeURIComponent(issueId)}`,
+    { method: "DELETE" }
+  );
+
+export const ignoreSecretResource = (namespace, kind, objectName) =>
+  request(`${secretPath(namespace, kind, objectName)}ignore-resource/`, {
+    method: "POST",
+  });
+
+export const unignoreSecretResource = (namespace, kind, objectName) =>
+  request(`${secretPath(namespace, kind, objectName)}ignore-resource/`, {
+    method: "DELETE",
+  });
+
+/** Combined list of whole-resource excludes and per-leak ignores (for restore UI). */
+export const getSecretLeakIgnores = () => request("/secret-leakage/ignores/");
+
 export function deploymentPath(namespace, deployment) {
   const ns = encodeURIComponent(namespace);
   const dep = encodeURIComponent(deployment);

@@ -97,12 +97,14 @@ def remove_ignored_rule(db, namespace: str, deployment: str, rule: str) -> List[
     return sorted(get_ignored_rules(db, namespace, deployment))
 
 
-def get_scanner_settings_doc(db) -> Dict[str, Any]:
-    doc = db.scanner_settings.find_one({"_id": SETTINGS_DOC_ID})
-    if not doc:
+def get_deployment_scanner_settings_doc(db) -> Dict[str, Any]:
+    """Deployment risk scanner: namespaces + workload skips (separate from secret scanner)."""
+    doc = db.scanner_settings.find_one({"_id": SETTINGS_DOC_ID}) or {}
+    nested = doc.get("deployment")
+    if isinstance(nested, dict):
         return {
-            "exclude_namespaces": [],
-            "skip_workloads": [],
+            "exclude_namespaces": list(nested.get("exclude_namespaces") or []),
+            "skip_workloads": list(nested.get("skip_workloads") or []),
         }
     return {
         "exclude_namespaces": list(doc.get("exclude_namespaces") or []),
@@ -110,26 +112,60 @@ def get_scanner_settings_doc(db) -> Dict[str, Any]:
     }
 
 
-def save_scanner_settings_doc(
+def save_deployment_scanner_settings_doc(
     db, exclude_namespaces: List[str], skip_workloads: List[str]
 ) -> Dict[str, Any]:
     db.scanner_settings.update_one(
         {"_id": SETTINGS_DOC_ID},
         {
             "$set": {
-                "exclude_namespaces": exclude_namespaces,
-                "skip_workloads": skip_workloads,
+                "deployment.exclude_namespaces": exclude_namespaces,
+                "deployment.skip_workloads": skip_workloads,
                 "updated_at": datetime.now(timezone.utc),
             },
             "$setOnInsert": {"_id": SETTINGS_DOC_ID},
         },
         upsert=True,
     )
-    return get_scanner_settings_doc(db)
+    db.scanner_settings.update_one(
+        {"_id": SETTINGS_DOC_ID},
+        {"$unset": {"exclude_namespaces": "", "skip_workloads": ""}},
+    )
+    return get_deployment_scanner_settings_doc(db)
+
+
+def get_secret_scanner_settings_doc(db) -> Dict[str, Any]:
+    """ConfigMap/Secret leakage scanner exclusions only."""
+    doc = db.scanner_settings.find_one({"_id": SETTINGS_DOC_ID}) or {}
+    sec = doc.get("secret_scanner")
+    if isinstance(sec, dict):
+        return {
+            "exclude_namespaces": list(sec.get("exclude_namespaces") or []),
+            "exclude_resources": list(sec.get("exclude_resources") or []),
+        }
+    return {"exclude_namespaces": [], "exclude_resources": []}
+
+
+def save_secret_scanner_settings_doc(
+    db, exclude_namespaces: List[str], exclude_resources: List[str]
+) -> Dict[str, Any]:
+    db.scanner_settings.update_one(
+        {"_id": SETTINGS_DOC_ID},
+        {
+            "$set": {
+                "secret_scanner.exclude_namespaces": exclude_namespaces,
+                "secret_scanner.exclude_resources": exclude_resources,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$setOnInsert": {"_id": SETTINGS_DOC_ID},
+        },
+        upsert=True,
+    )
+    return get_secret_scanner_settings_doc(db)
 
 
 def merge_scan_params_with_settings(db, params: Dict[str, Any]) -> Dict[str, Any]:
-    settings = get_scanner_settings_doc(db)
+    settings = get_deployment_scanner_settings_doc(db)
     merged = dict(params)
     req_exclude = merged.get("exclude_namespaces")
     if isinstance(req_exclude, str):
@@ -146,6 +182,30 @@ def merge_scan_params_with_settings(db, params: Dict[str, Any]) -> Dict[str, Any
         req_skip = []
     merged["skip_workloads"] = list(
         {*(settings.get("skip_workloads") or []), *req_skip}
+    )
+    return merged
+
+
+def merge_secret_scan_params_with_settings(
+    db, params: Dict[str, Any]
+) -> Dict[str, Any]:
+    settings = get_secret_scanner_settings_doc(db)
+    merged = dict(params)
+    req_exclude = merged.get("exclude_namespaces")
+    if isinstance(req_exclude, str):
+        req_exclude = [x.strip() for x in req_exclude.split(",") if x.strip()]
+    elif req_exclude is None:
+        req_exclude = []
+    merged["exclude_namespaces"] = list(
+        {*(settings.get("exclude_namespaces") or []), *req_exclude}
+    )
+    req_res = merged.get("exclude_resources")
+    if isinstance(req_res, str):
+        req_res = [x.strip() for x in req_res.split(",") if x.strip()]
+    elif req_res is None:
+        req_res = []
+    merged["exclude_resources"] = list(
+        {*(settings.get("exclude_resources") or []), *req_res}
     )
     return merged
 

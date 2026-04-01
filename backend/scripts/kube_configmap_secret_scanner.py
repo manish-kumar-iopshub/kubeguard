@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 import re
 
@@ -265,7 +266,6 @@ def _scan_secret_metadata(secret: Any) -> List[Dict[str, Any]]:
 
     namespace = metadata.namespace
     object_name = metadata.name
-    stype = getattr(secret, "type", None) or ""
 
     findings.extend(
         _scan_annotations_and_labels(
@@ -296,21 +296,6 @@ def _scan_secret_metadata(secret: Any) -> List[Dict[str, Any]]:
                     recommendation="Avoid committing plaintext stringData in manifests; use secure secret delivery.",
                 )
             )
-
-    if _is_suspicious_key(object_name) and stype == "Opaque":
-        findings.append(
-            _create_finding(
-                severity="low",
-                rule_id="secret-name-indicates-sensitive-content",
-                message="Secret name indicates sensitive content; verify strict access control and rotation policy.",
-                namespace=namespace,
-                kind="Secret",
-                object_name=object_name,
-                field_path="metadata.name",
-                evidence=object_name,
-                recommendation="Confirm least-privilege RBAC and rotation cadence for this secret.",
-            )
-        )
 
     return findings
 
@@ -371,9 +356,121 @@ def _build_summaries(findings: List[Dict[str, Any]]) -> Tuple[Dict[str, int], Di
     return summary_by_namespace, summary_by_severity, object_risk_summary
 
 
+def _normalize_exclude_resource_lines(raw: Optional[List[str]]) -> Set[Tuple[str, str, str]]:
+    """
+    Build set of (kind, namespace, name) with kind in {configmap, secret}.
+    Accepts lines:
+      configmap:ns/name  or  secret:ns/name  or  cm:ns/name
+      ns/name  -> excludes both configmap and secret with that name in ns
+    """
+    out: Set[Tuple[str, str, str]] = set()
+    if not raw:
+        return out
+    for line0 in raw:
+        line = (line0 or "").strip()
+        if not line:
+            continue
+        low = line.lower()
+        if ":" in low:
+            kind_part, rest = low.split(":", 1)
+            kind_part = kind_part.strip()
+            rest = rest.strip()
+            if "/" not in rest:
+                continue
+            ns, nm = rest.split("/", 1)
+            ns, nm = ns.strip(), nm.strip()
+            if kind_part in ("cm", "configmap"):
+                out.add(("configmap", ns, nm))
+            elif kind_part in ("secret", "sec"):
+                out.add(("secret", ns, nm))
+        else:
+            if "/" not in line:
+                continue
+            ns, nm = line.split("/", 1)
+            ns, nm = ns.strip(), nm.strip()
+            out.add(("configmap", ns, nm))
+            out.add(("secret", ns, nm))
+    return out
+
+
+def _resource_scan_skipped(kind: str, namespace: str, name: str, excluded: Set[Tuple[str, str, str]]) -> bool:
+    k = kind.lower()
+    if k == "configmap":
+        return ("configmap", namespace, name) in excluded
+    if k == "secret":
+        return ("secret", namespace, name) in excluded
+    return False
+
+
+def _issue_key_from_field_path(field_path: str) -> str:
+    if not field_path:
+        return ""
+    return field_path.rsplit(".", 1)[-1]
+
+
+def _group_findings_by_resource(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for f in findings:
+        key = (f["namespace"], f["kind"], f["object_name"])
+        grouped[key].append(f)
+    rows: List[Dict[str, Any]] = []
+    for (ns, kind, oname), items in grouped.items():
+        high = sum(1 for x in items if x.get("severity") == "high")
+        medium = sum(1 for x in items if x.get("severity") == "medium")
+        low = sum(1 for x in items if x.get("severity") == "low")
+        max_sev = "low"
+        for x in items:
+            sev = x.get("severity") or "low"
+            if SEVERITY_ORDER.get(sev, 0) > SEVERITY_ORDER.get(max_sev, 0):
+                max_sev = sev
+        issues = []
+        for it in sorted(
+            items,
+            key=lambda x: (
+                -SEVERITY_ORDER.get(x.get("severity") or "low", 0),
+                x.get("field_path") or "",
+            ),
+        ):
+            fp = it.get("field_path") or ""
+            issue_id = f"{it.get('rule_id', '')}|{fp}"
+            issues.append({
+                "finding_id": it.get("id"),
+                "issue_id": issue_id,
+                "issue_key": _issue_key_from_field_path(fp),
+                "field_path": fp,
+                "severity": it.get("severity"),
+                "rule_id": it.get("rule_id"),
+                "message": it.get("message"),
+                "evidence_masked": it.get("evidence_masked"),
+            })
+        rows.append({
+            "namespace": ns,
+            "kind": kind,
+            "object_name": oname,
+            "total_findings": len(items),
+            "high": high,
+            "medium": medium,
+            "low": low,
+            "max_severity": max_sev,
+            "issues": issues,
+        })
+    rows.sort(
+        key=lambda r: (
+            -SEVERITY_ORDER[r["max_severity"]],
+            -r["high"],
+            -r["total_findings"],
+            r["namespace"],
+            r["kind"],
+            r["object_name"],
+        ),
+    )
+    return rows
+
+
 def scan_configmaps_and_secrets(
     *,
     exclude_namespaces: Optional[List[str]] = None,
+    exclude_resources: Optional[List[str]] = None,
     include_kinds: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Scan Kubernetes ConfigMaps and Secrets for likely secret leakage patterns."""
@@ -383,6 +480,7 @@ def scan_configmaps_and_secrets(
     include = {k.lower() for k in (include_kinds or DEFAULT_INCLUDE_KINDS)}
     exclude_set = set(DEFAULT_EXCLUDED_NAMESPACES)
     exclude_set.update(ns.strip() for ns in (exclude_namespaces or []) if ns and ns.strip())
+    resource_exclude = _normalize_exclude_resource_lines(exclude_resources)
 
     findings: List[Dict[str, Any]] = []
     scan_errors: List[Dict[str, str]] = []
@@ -397,6 +495,9 @@ def scan_configmaps_and_secrets(
 
     print(f"Scanning kinds: {', '.join(sorted(include & SUPPORTED_KINDS))}")
     print(f"Excluding namespaces: {', '.join(sorted(exclude_set))}")
+    if resource_exclude:
+        printable = sorted(f"{k}/{ns}/{nm}" for k, ns, nm in resource_exclude)
+        print(f"Excluding resources: {', '.join(printable)}")
 
     # Scan ConfigMaps.
     if "configmap" in include:
@@ -406,7 +507,10 @@ def scan_configmaps_and_secrets(
             print(f"       Retrieved {len(configmaps)} configmaps, scanning...")
             for cm in configmaps:
                 ns = cm.metadata.namespace
+                name = cm.metadata.name
                 if ns in exclude_set:
+                    continue
+                if _resource_scan_skipped("configmap", ns, name, resource_exclude):
                     continue
                 object_scan_counts["configmap"] += 1
                 findings.extend(_scan_configmap(cm))
@@ -423,7 +527,10 @@ def scan_configmaps_and_secrets(
             print(f"       Retrieved {len(secrets)} secrets, scanning...")
             for sec in secrets:
                 ns = sec.metadata.namespace
+                name = sec.metadata.name
                 if ns in exclude_set:
+                    continue
+                if _resource_scan_skipped("secret", ns, name, resource_exclude):
                     continue
                 object_scan_counts["secret"] += 1
                 findings.extend(_scan_secret_metadata(sec))
@@ -436,18 +543,24 @@ def scan_configmaps_and_secrets(
     print("Building summaries...")
     findings_with_ids = _append_findings_with_ids(findings)
     summary_by_namespace, summary_by_severity, object_risk_summary = _build_summaries(findings_with_ids)
+    resource_findings = _group_findings_by_resource(findings_with_ids)
+    exclude_resources_applied = sorted(
+        f"{k}/{ns}/{nm}" for k, ns, nm in resource_exclude
+    )
 
     result = {
         "timestamp": get_time_now(),
         "cluster_name": CLUSTER_NAME,
         "scanner_mode": "configmap_secret_only",
         "exclude_namespaces": sorted(exclude_set),
+        "exclude_resources": exclude_resources_applied,
         "include_kinds": sorted(include),
         "objects_scanned": object_scan_counts,
         "total_findings": len(findings_with_ids),
         "summary_by_namespace": summary_by_namespace,
         "summary_by_severity": summary_by_severity,
         "object_risk_summary": object_risk_summary,
+        "resource_findings": resource_findings,
         "findings": findings_with_ids,
         "scan_errors": scan_errors,
     }

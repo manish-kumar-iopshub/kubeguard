@@ -40,3 +40,40 @@ class LatestScanView(APIView):
         if not result:
             return Response({"error": "No completed scans found"}, status=404)
         return Response(result)
+
+
+class ScannerSettingsView(APIView):
+    def get(self, request):
+        return Response(services.get_scanner_settings())
+
+    def put(self, request):
+        body = request.data or {}
+        saved = services.save_scanner_settings(
+            body.get("exclude_namespaces", []),
+            body.get("skip_workloads", []),
+        )
+        return Response(saved)
+
+
+class DeploymentWorkloadView(APIView):
+    def get(self, request, namespace, deployment):
+        detail = services.deployment_detail(namespace, deployment)
+        if detail.get("error"):
+            return Response(detail, status=404)
+        return Response(detail)
+
+
+class DeploymentIgnoreRuleView(APIView):
+    def post(self, request, namespace, deployment):
+        rule = (request.data or {}).get("rule")
+        if not rule or not isinstance(rule, str):
+            return Response({"error": "Missing or invalid 'rule'"}, status=400)
+        result = services.ignore_deployment_rule(namespace, deployment, rule.strip())
+        return Response(result)
+
+    def delete(self, request, namespace, deployment):
+        rule = request.query_params.get("rule")
+        if not rule:
+            return Response({"error": "Missing query param 'rule'"}, status=400)
+        result = services.unignore_deployment_rule(namespace, deployment, rule.strip())
+        return Response(result)

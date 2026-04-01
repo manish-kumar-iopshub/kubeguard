@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { Link } from "react-router-dom";
 import { getLatestScan, triggerScan, pollScan } from "../api";
 
 function RiskBadge({ level }) {
@@ -40,8 +41,10 @@ function ScoreBar({ score }) {
 export default function DeploymentRisk() {
   const [scan, setScan] = useState(null);
   const [scanning, setScanning] = useState(false);
-  const [expanded, setExpanded] = useState({});
   const [error, setError] = useState(null);
+  const [nsFilter, setNsFilter] = useState("");
+  const [riskFilter, setRiskFilter] = useState("");
+  const [sortBy, setSortBy] = useState("effective_desc");
 
   const load = useCallback(() => {
     getLatestScan("deployments")
@@ -73,14 +76,59 @@ export default function DeploymentRisk() {
   const deps = scan?.data?.deployments || [];
   const dist = scan?.data?.risk_distribution || {};
 
+  const namespaces = useMemo(() => {
+    const s = new Set(deps.map((d) => d.namespace));
+    return Array.from(s).sort();
+  }, [deps]);
+
+  const filteredSorted = useMemo(() => {
+    let list = [...deps];
+    const q = nsFilter.trim().toLowerCase();
+    if (q) {
+      list = list.filter((d) => d.namespace.toLowerCase().includes(q));
+    }
+    if (riskFilter) {
+      list = list.filter((d) => d.risk_level === riskFilter);
+    }
+    list.sort((a, b) => {
+      switch (sortBy) {
+        case "effective_asc":
+          return (a.effective_score ?? a.score) - (b.effective_score ?? b.score);
+        case "effective_desc":
+          return (b.effective_score ?? b.score) - (a.effective_score ?? a.score);
+        case "raw_desc":
+          return (b.raw_score ?? b.score) - (a.raw_score ?? a.score);
+        case "name_asc":
+          return a.deployment.localeCompare(b.deployment);
+        case "namespace_asc":
+          return a.namespace.localeCompare(b.namespace);
+        default:
+          return 0;
+      }
+    });
+    return list;
+  }, [deps, nsFilter, riskFilter, sortBy]);
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
         <div>
           <h2 className="text-2xl font-bold">Deployment Risk Scores</h2>
           {scan?.created_at && (
             <p className="text-xs text-gray-400 mt-1">
               Last scan: {new Date(scan.created_at).toLocaleString()}
+              {scan.data?.average_effective_score != null && (
+                <span className="ml-2">
+                  · Avg effective:{" "}
+                  <strong>{scan.data.average_effective_score}</strong>
+                  {scan.data.average_score != null && (
+                    <span className="text-gray-400">
+                      {" "}
+                      (raw {scan.data.average_score})
+                    </span>
+                  )}
+                </span>
+              )}
             </p>
           )}
         </div>
@@ -92,6 +140,12 @@ export default function DeploymentRisk() {
           {scanning ? "Scoring…" : "Run Scan"}
         </button>
       </div>
+
+      <p className="text-sm text-gray-600 mb-4">
+        Each scan is stored in MongoDB. Run scans over time to build a score
+        trend per workload. Ignored rules (from the detail page) raise the
+        effective score without changing raw scanner output.
+      </p>
 
       {error && (
         <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">
@@ -131,12 +185,60 @@ export default function DeploymentRisk() {
             })}
           </div>
 
-          <div className="mb-3 text-sm text-gray-500">
-            Average score:{" "}
-            <span className="font-bold text-gray-800">
-              {scan.data?.average_score ?? "—"}
-            </span>{" "}
-            / 100 across {deps.length} deployments
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-4 flex flex-wrap gap-4 items-end">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">
+                Namespace contains
+              </label>
+              <input
+                type="text"
+                list="ns-suggest"
+                value={nsFilter}
+                onChange={(e) => setNsFilter(e.target.value)}
+                placeholder="e.g. prod"
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-48"
+              />
+              <datalist id="ns-suggest">
+                {namespaces.map((n) => (
+                  <option key={n} value={n} />
+                ))}
+              </datalist>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">
+                Risk (effective)
+              </label>
+              <select
+                value={riskFilter}
+                onChange={(e) => setRiskFilter(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              >
+                <option value="">All</option>
+                <option value="Critical">Critical</option>
+                <option value="High">High</option>
+                <option value="Medium">Medium</option>
+                <option value="Low">Low</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">
+                Sort
+              </label>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              >
+                <option value="effective_desc">Effective score ↓</option>
+                <option value="effective_asc">Effective score ↑</option>
+                <option value="raw_desc">Raw score ↓</option>
+                <option value="name_asc">Name A–Z</option>
+                <option value="namespace_asc">Namespace A–Z</option>
+              </select>
+            </div>
+            <p className="text-sm text-gray-500 pb-2">
+              Showing {filteredSorted.length} of {deps.length}
+            </p>
           </div>
 
           {deps.length > 0 && (
@@ -146,76 +248,39 @@ export default function DeploymentRisk() {
                   <tr>
                     <th className="px-4 py-3 text-left">Deployment</th>
                     <th className="px-4 py-3 text-left">Namespace</th>
-                    <th className="px-4 py-3 text-left">Score</th>
+                    <th className="px-4 py-3 text-left">Effective</th>
+                    <th className="px-4 py-3 text-left">Raw</th>
                     <th className="px-4 py-3 text-left">Risk</th>
                     <th className="px-4 py-3 text-right">Replicas</th>
+                    <th className="px-4 py-3 text-right">Details</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {deps.map((d, i) => (
-                    <>
-                      <tr
-                        key={i}
-                        className="hover:bg-gray-50 cursor-pointer"
-                        onClick={() =>
-                          setExpanded((prev) => ({ ...prev, [i]: !prev[i] }))
-                        }
-                      >
-                        <td className="px-4 py-3 font-medium">
-                          <span className="mr-1 text-gray-400">
-                            {expanded[i] ? "▾" : "▸"}
-                          </span>
-                          {d.deployment}
-                        </td>
-                        <td className="px-4 py-3 text-gray-500">
-                          {d.namespace}
-                        </td>
-                        <td className="px-4 py-3">
-                          <ScoreBar score={d.score} />
-                        </td>
-                        <td className="px-4 py-3">
-                          <RiskBadge level={d.risk_level} />
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          {d.replicas ?? "—"}
-                        </td>
-                      </tr>
-                      {expanded[i] && d.deductions?.length > 0 && (
-                        <tr key={`${i}-ded`}>
-                          <td colSpan={5} className="px-6 py-4 bg-gray-50">
-                            <p className="font-semibold text-xs text-gray-600 mb-2">
-                              Deductions ({d.deductions.length})
-                            </p>
-                            <div className="space-y-1.5">
-                              {d.deductions.map((dd, j) => (
-                                <div
-                                  key={j}
-                                  className="flex items-start gap-3 text-xs"
-                                >
-                                  <span className="font-mono text-red-500 w-8 shrink-0 text-right">
-                                    {dd.weight}
-                                  </span>
-                                  <span
-                                    className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                                      dd.category === "security"
-                                        ? "bg-red-50 text-red-600"
-                                        : dd.category === "reliability"
-                                        ? "bg-amber-50 text-amber-600"
-                                        : "bg-blue-50 text-blue-600"
-                                    }`}
-                                  >
-                                    {dd.category}
-                                  </span>
-                                  <span className="text-gray-600">
-                                    {dd.detail}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </>
+                  {filteredSorted.map((d, i) => (
+                    <tr key={`${d.namespace}/${d.deployment}`} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 font-medium">{d.deployment}</td>
+                      <td className="px-4 py-3 text-gray-500">{d.namespace}</td>
+                      <td className="px-4 py-3">
+                        <ScoreBar score={d.effective_score ?? d.score} />
+                      </td>
+                      <td className="px-4 py-3 text-gray-500">
+                        {d.raw_score ?? d.score}
+                      </td>
+                      <td className="px-4 py-3">
+                        <RiskBadge level={d.risk_level} />
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {d.replicas ?? "—"}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <Link
+                          to={`/deployment-risk/${encodeURIComponent(d.namespace)}/${encodeURIComponent(d.deployment)}`}
+                          className="text-indigo-600 hover:underline font-medium"
+                        >
+                          Open
+                        </Link>
+                      </td>
+                    </tr>
                   ))}
                 </tbody>
               </table>

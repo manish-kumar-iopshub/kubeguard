@@ -282,6 +282,45 @@ def _check_security(
     return deductions
 
 
+def _collect_pod_anti_affinity_terms(affinity: Any) -> List[Any]:
+    """Return PodAffinityTerm objects from podAntiAffinity (preferred + required)."""
+    terms: List[Any] = []
+    if not affinity:
+        return terms
+    paa = getattr(affinity, "pod_anti_affinity", None)
+    if not paa:
+        return terms
+    for weighted in getattr(paa, "preferred_during_scheduling_ignored_during_execution", None) or []:
+        term = getattr(weighted, "pod_affinity_term", None)
+        if term is not None:
+            terms.append(term)
+    for term in getattr(paa, "required_during_scheduling_ignored_during_execution", None) or []:
+        if term is not None:
+            terms.append(term)
+    return terms
+
+
+def _has_pod_anti_affinity(pod_spec: Any) -> bool:
+    affinity = getattr(pod_spec, "affinity", None)
+    return len(_collect_pod_anti_affinity_terms(affinity)) > 0
+
+
+def _has_topology_distribution(pod_spec: Any) -> bool:
+    """
+    True if the pod spreads across topology via topologySpreadConstraints
+    or via podAntiAffinity with a non-empty topologyKey (e.g. hostname / zone).
+    """
+    tsc = getattr(pod_spec, "topology_spread_constraints", None) or []
+    if tsc:
+        return True
+    affinity = getattr(pod_spec, "affinity", None)
+    for term in _collect_pod_anti_affinity_terms(affinity):
+        tk = getattr(term, "topology_key", None)
+        if tk and str(tk).strip():
+            return True
+    return False
+
+
 def _check_scaling(
     pod_spec: Any,
     hpa_targets: Set[Tuple[str, str]],
@@ -300,14 +339,7 @@ def _check_scaling(
         })
 
     # No anti-affinity (-10)
-    affinity = getattr(pod_spec, "affinity", None)
-    paa = getattr(affinity, "pod_anti_affinity", None) if affinity else None
-    has_anti_affinity = False
-    if paa:
-        preferred = getattr(paa, "preferred_during_scheduling_ignored_during_execution", None) or []
-        required = getattr(paa, "required_during_scheduling_ignored_during_execution", None) or []
-        has_anti_affinity = bool(preferred or required)
-    if not has_anti_affinity:
+    if not _has_pod_anti_affinity(pod_spec):
         deductions.append({
             "rule": "no_anti_affinity",
             "category": "scaling",
@@ -315,14 +347,16 @@ def _check_scaling(
             "detail": "No pod anti-affinity rules defined",
         })
 
-    # No topology spread (-10)
-    tsc = getattr(pod_spec, "topology_spread_constraints", None) or []
-    if not tsc:
+    # No topology spread (-10) — topologySpreadConstraints OR anti-affinity with topologyKey
+    if not _has_topology_distribution(pod_spec):
         deductions.append({
             "rule": "no_topology_spread",
             "category": "scaling",
             "weight": -10,
-            "detail": "No topologySpreadConstraints defined",
+            "detail": (
+                "No topologySpreadConstraints and no podAntiAffinity with topologyKey "
+                "(e.g. kubernetes.io/hostname or topology zone)"
+            ),
         })
 
     return deductions

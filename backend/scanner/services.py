@@ -6,22 +6,26 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from .db import get_db
+from .deployment_risk import (
+    enrich_deployments_payload,
+    merge_scan_params_with_settings,
+    get_scanner_settings_doc,
+    save_scanner_settings_doc,
+    add_ignored_rule,
+    remove_ignored_rule,
+    get_deployment_detail,
+)
 
 SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts"))
 if SCANNER_DIR not in sys.path:
     sys.path.insert(0, SCANNER_DIR)
-
-from pod_scanner_basic import collect_unhealthy_pods  # noqa: E402
-from kube_configmap_secret_scanner import scan_configmaps_and_secrets  # noqa: E402
-from deployment_risk_scorer import score_deployments  # noqa: E402
-
 
 def _now():
     return datetime.now(timezone.utc)
 
 
 def _serialize(doc):
-    """Make a MongoDB document JSON-safe."""
+    """Make a MongoDB document JSON-safe (top-level)."""
     if doc is None:
         return None
     doc = dict(doc)
@@ -31,6 +35,18 @@ def _serialize(doc):
         elif isinstance(val, datetime):
             doc[key] = val.isoformat()
     return doc
+
+
+def _maybe_enrich_deployments_scan(doc):
+    if not doc or doc.get("scan_type") != "deployments":
+        return doc
+    if doc.get("status") != "completed" or not doc.get("data"):
+        return doc
+    db = get_db()
+    data = enrich_deployments_payload(doc["data"], db)
+    out = dict(doc)
+    out["data"] = data
+    return out
 
 
 def trigger_scan(scan_type, params=None):
@@ -57,6 +73,13 @@ def trigger_scan(scan_type, params=None):
 def _run_scan(scan_id, scan_type, params):
     db = get_db()
     try:
+        from pod_scanner_basic import collect_unhealthy_pods  # noqa: E402
+        from kube_configmap_secret_scanner import scan_configmaps_and_secrets  # noqa: E402
+        from deployment_risk_scorer import score_deployments  # noqa: E402
+
+        if scan_type == "deployments":
+            params = merge_scan_params_with_settings(db, params)
+
         exclude_ns = params.get("exclude_namespaces")
         if isinstance(exclude_ns, str):
             exclude_ns = [n.strip() for n in exclude_ns.split(",") if n.strip()]
@@ -116,6 +139,7 @@ def get_scan(scan_id):
         doc = db.scan_results.find_one({"_id": ObjectId(scan_id)})
     except Exception:
         return None
+    doc = _maybe_enrich_deployments_scan(doc)
     return _serialize(doc)
 
 
@@ -136,6 +160,7 @@ def get_latest_scan(scan_type):
         {"scan_type": scan_type, "status": "completed"},
         sort=[("created_at", -1)],
     )
+    doc = _maybe_enrich_deployments_scan(doc)
     return _serialize(doc)
 
 
@@ -153,3 +178,33 @@ def get_dashboard():
                 "summary": scan.get("summary"),
             }
     return {"total_scans": total_scans, "latest": latest}
+
+
+def get_scanner_settings():
+    return get_scanner_settings_doc(get_db())
+
+
+def save_scanner_settings(exclude_namespaces, skip_workloads):
+    if isinstance(exclude_namespaces, str):
+        exclude_namespaces = [x.strip() for x in exclude_namespaces.split(",") if x.strip()]
+    if isinstance(skip_workloads, str):
+        skip_workloads = [x.strip() for x in skip_workloads.split(",") if x.strip()]
+    return save_scanner_settings_doc(
+        get_db(),
+        list(exclude_namespaces or []),
+        list(skip_workloads or []),
+    )
+
+
+def deployment_detail(namespace, deployment):
+    return get_deployment_detail(get_db(), namespace, deployment)
+
+
+def ignore_deployment_rule(namespace, deployment, rule):
+    rules = add_ignored_rule(get_db(), namespace, deployment, rule)
+    return {"ignored_rules": rules}
+
+
+def unignore_deployment_rule(namespace, deployment, rule):
+    rules = remove_ignored_rule(get_db(), namespace, deployment, rule)
+    return {"ignored_rules": rules}

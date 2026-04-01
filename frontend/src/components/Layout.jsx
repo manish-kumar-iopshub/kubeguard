@@ -5,6 +5,7 @@ const NAV = [
   { to: "/unhealthy-pods", label: "Unhealthy Pods", icon: "⚠" },
   { to: "/secret-leakage", label: "Secret Leakage", icon: "⛨" },
   { to: "/deployment-risk", label: "Deployment Risk", icon: "◆" },
+  { to: "/settings", label: "Scanner settings", icon: "⚙" },
 ];
 
 function SideLink({ to, label, icon }) {

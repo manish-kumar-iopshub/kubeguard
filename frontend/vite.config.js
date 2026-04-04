@@ -5,8 +5,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 3000,
+    // Use "/api/" so "/api-pen-test" (SPA route) is NOT proxied to the backend.
     proxy: {
-      "/api": {
+      "/api/": {
         target: "http://localhost:8000",
         changeOrigin: true,
       },

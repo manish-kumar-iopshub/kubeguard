@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getDashboard, getScans } from "../api";
 
 const SCAN_LABELS = {
   pods: "Unhealthy Pods",
   secrets: "Secret Leakage",
   deployments: "Deployment Risk",
+  api_pt: "API Pen Test",
 };
 
 function StatCard({ title, children, color }) {
@@ -30,6 +32,7 @@ function StatusBadge({ status }) {
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [dashboard, setDashboard] = useState(null);
   const [scans, setScans] = useState([]);
   const [error, setError] = useState(null);
@@ -62,7 +65,7 @@ export default function Dashboard() {
     <div>
       <h2 className="text-2xl font-bold mb-6">Dashboard</h2>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
         <StatCard title="Unhealthy Pods" color="text-red-600">
           {latest.pods ? (
             <>
@@ -113,6 +116,23 @@ export default function Dashboard() {
             <p className="text-sm text-gray-400">No scan yet</p>
           )}
         </StatCard>
+
+        <StatCard title="API pen test" color="text-rose-600">
+          {latest.api_pt ? (
+            <>
+              <p className="text-3xl font-bold">
+                {latest.api_pt.summary?.total_findings ?? "—"}
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                C:{latest.api_pt.summary?.critical ?? 0} H:
+                {latest.api_pt.summary?.high ?? 0} M:
+                {latest.api_pt.summary?.medium ?? 0}
+              </p>
+            </>
+          ) : (
+            <p className="text-sm text-gray-400">No scan yet</p>
+          )}
+        </StatCard>
       </div>
 
       <h3 className="text-lg font-semibold mb-3">Recent Scans</h3>
@@ -121,41 +141,52 @@ export default function Dashboard() {
           No scans yet. Go to a scanner page and run one.
         </p>
       ) : (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
-              <tr>
-                <th className="px-4 py-3 text-left">Type</th>
-                <th className="px-4 py-3 text-left">Status</th>
-                <th className="px-4 py-3 text-left">Started</th>
-                <th className="px-4 py-3 text-left">Summary</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {scans.slice(0, 20).map((s) => (
-                <tr key={s._id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium">
-                    {SCAN_LABELS[s.scan_type] || s.scan_type}
-                  </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={s.status} />
-                  </td>
-                  <td className="px-4 py-3 text-gray-500">
-                    {s.created_at
-                      ? new Date(s.created_at).toLocaleString()
-                      : "—"}
-                  </td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">
-                    {s.summary
-                      ? JSON.stringify(s.summary)
-                          .replace(/[{}"]/g, "")
-                          .replace(/,/g, " · ")
-                      : s.error || "—"}
-                  </td>
+        <div>
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
+                <tr>
+                  <th className="px-4 py-3 text-left">Scan</th>
+                  <th className="px-4 py-3 text-left w-40">Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {scans.slice(0, 20).map((s) => (
+                  <tr
+                    key={s._id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => navigate(`/scans/${s._id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        navigate(`/scans/${s._id}`);
+                      }
+                    }}
+                    className="hover:bg-indigo-50/50 cursor-pointer"
+                  >
+                    <td className="px-4 py-3">
+                      <span className="font-medium text-gray-900">
+                        {SCAN_LABELS[s.scan_type] || s.scan_type}
+                      </span>
+                      <span className="block text-xs text-gray-400 mt-0.5 font-mono">
+                        {s.created_at
+                          ? new Date(s.created_at).toLocaleString()
+                          : "—"}{" "}
+                        · {s._id}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={s.status} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">
+            Click a row to open the full scan payload.
+          </p>
         </div>
       )}
     </div>

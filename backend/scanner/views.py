@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 
 from . import services
 
-VALID_SCAN_TYPES = {"pods", "secrets", "deployments"}
+VALID_SCAN_TYPES = {"pods", "secrets", "deployments", "api_pt"}
 
 
 class DashboardView(APIView):
@@ -127,6 +127,27 @@ class SecretLeakIgnoresOverviewView(APIView):
 
     def get(self, request):
         return Response(services.get_secret_leak_ignores_overview())
+
+
+class ApiPtScannerSettingsView(APIView):
+    """Default target URL and auth hints for API penetration scans (MongoDB)."""
+
+    def get(self, request):
+        return Response(services.get_api_pt_scanner_settings())
+
+    def put(self, request):
+        body = request.data or {}
+        try:
+            saved = services.save_api_pt_scanner_settings(
+                target_url=body.get("target_url"),
+                token=body.get("token"),
+                username=body.get("username"),
+                password=body.get("password"),
+                delay=body.get("delay"),
+            )
+            return Response(saved)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)
 
 
 class PodAlertSettingsView(APIView):

@@ -43,6 +43,15 @@ export const getPodAlertSettings = () => request("/settings/pod-alerts/");
 export const savePodAlertSettings = (body) =>
   request("/settings/pod-alerts/", { method: "PUT", body: JSON.stringify(body) });
 
+export const getApiPtScannerSettings = () =>
+  request("/settings/api-pt-scanner/");
+
+export const saveApiPtScannerSettings = (body) =>
+  request("/settings/api-pt-scanner/", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
 function secretPath(namespace, kind, objectName) {
   return `/secrets/${encodeURIComponent(namespace)}/${encodeURIComponent(
     kind

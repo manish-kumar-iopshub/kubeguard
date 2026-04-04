@@ -5,6 +5,7 @@ docker exec -it <container-name> ollama pull phi
 
 <!-- for models -->
 curl http://localhost:11434/api/tags
+curl https://llmapi.psaux.ai/api/tags
 
 <!-- basic response style -->
 curl http://localhost:11434/api/generate -d '{
@@ -14,8 +15,8 @@ curl http://localhost:11434/api/generate -d '{
 }' | jq -r .
 
 <!-- streaming response aka chat style aka word by word in streams-->
-curl http://localhost:11434/api/generate -d '{
-  "model": "phi:latest",
+time curl https://llmapi.psaux.ai/api/generate -d '{
+  "model": "gpt-oss:20b",
   "prompt": "Write a short poem on DevOps"
 }'
 

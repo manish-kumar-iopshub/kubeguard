@@ -269,6 +269,51 @@ def _run_scan(scan_id, scan_type, params):
                 "average_score": data.get("average_score", 0),
                 "risk_distribution": data.get("risk_distribution", {}),
             }
+        elif scan_type == "api_pt":
+            from api_pt_scanner import run_api_pt_scan, ApiPtTargetUnreachable  # noqa: E402
+
+            settings = get_api_pt_scanner_settings()
+            target = (params.get("target_url") or "").strip() or (
+                settings.get("target_url") or ""
+            ).strip()
+            if not target:
+                raise ValueError(
+                    "target_url is required (enter on the API Pen Test page or save defaults in settings)"
+                )
+            token = params.get("token")
+            if token is None:
+                token = settings.get("token") or None
+            if isinstance(token, str) and not token.strip():
+                token = None
+            username = params.get("username")
+            if username is None:
+                username = settings.get("username") or "admin"
+            password = params.get("password")
+            if password is None:
+                password = settings.get("password") or "password"
+            delay = params.get("delay")
+            if delay is None:
+                delay = settings.get("delay", 0.3)
+            try:
+                data = run_api_pt_scan(
+                    target,
+                    token=token,
+                    username=username,
+                    password=password,
+                    delay=delay,
+                )
+            except ApiPtTargetUnreachable as unreachable:
+                raise RuntimeError(str(unreachable)) from unreachable
+            sev = data.get("summary_by_severity") or {}
+            summary = {
+                "total_findings": data.get("total_findings", 0),
+                "critical": sev.get("CRITICAL", 0),
+                "high": sev.get("HIGH", 0),
+                "medium": sev.get("MEDIUM", 0),
+                "low": sev.get("LOW", 0),
+                "info": sev.get("INFO", 0),
+                "pass": sev.get("PASS", 0),
+            }
         else:
             raise ValueError(f"Unknown scan type: {scan_type}")
 
@@ -334,7 +379,7 @@ def get_dashboard():
     db = get_db()
     total_scans = db.scan_results.count_documents({})
     latest = {}
-    for stype in ("pods", "secrets", "deployments"):
+    for stype in ("pods", "secrets", "deployments", "api_pt"):
         scan = get_latest_scan(stype)
         if scan:
             latest[stype] = {
@@ -471,6 +516,63 @@ def get_secret_leak_ignores_overview():
         key=lambda x: (x["namespace"] or "", x["kind"] or "", x["object_name"] or "")
     )
     return {"excluded_resources": excluded, "ignored_issues": ignored_issues}
+
+
+def _default_api_pt_scanner_settings():
+    return {
+        "target_url": "",
+        "token": "",
+        "username": "admin",
+        "password": "",
+        "delay": 0.3,
+    }
+
+
+def get_api_pt_scanner_settings():
+    """Default target and auth for API penetration scans (MongoDB app_settings)."""
+    db = get_db()
+    d = _default_api_pt_scanner_settings()
+    doc = db.app_settings.find_one({"_id": "api_pt_scanner"}) or {}
+    return {
+        "target_url": str(doc.get("target_url", d["target_url"])),
+        "token": str(doc.get("token", d["token"])),
+        "username": str(doc.get("username", d["username"])),
+        "password": str(doc.get("password", d["password"])),
+        "delay": float(doc.get("delay", d["delay"])),
+    }
+
+
+def save_api_pt_scanner_settings(
+    target_url=None,
+    token=None,
+    username=None,
+    password=None,
+    delay=None,
+):
+    cur = get_api_pt_scanner_settings()
+    tgt = cur["target_url"] if target_url is None else str(target_url).strip()
+    tok = cur["token"] if token is None else str(token)
+    user = cur["username"] if username is None else str(username).strip() or "admin"
+    pwd = cur["password"] if password is None else str(password)
+    dly = cur["delay"] if delay is None else float(delay)
+    if dly < 0:
+        raise ValueError("delay must be >= 0")
+    db = get_db()
+    db.app_settings.update_one(
+        {"_id": "api_pt_scanner"},
+        {
+            "$set": {
+                "target_url": tgt,
+                "token": tok,
+                "username": user,
+                "password": pwd,
+                "delay": dly,
+                "updated_at": _now(),
+            }
+        },
+        upsert=True,
+    )
+    return get_api_pt_scanner_settings()
 
 
 def _default_pod_alert_settings():

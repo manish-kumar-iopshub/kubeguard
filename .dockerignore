@@ -1,0 +1,13 @@
+.git
+.gitignore
+**/.DS_Store
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+**/db.sqlite3
+dump
+*.md
+terminals

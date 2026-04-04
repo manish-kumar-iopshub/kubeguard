@@ -1,0 +1,26 @@
+# Run UI + API + MongoDB together:
+#   docker compose up --build
+# Open http://localhost:8080 (nginx serves React; /api/* → Django)
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+
+  app:
+    build: .
+    ports:
+      - "8080:80"
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-kube_scanner}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
+      DJANGO_DEBUG: "False"
+    depends_on:
+      - mongo
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
